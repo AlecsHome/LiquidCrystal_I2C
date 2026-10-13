@@ -4,14 +4,18 @@
 #include <Wire.h>
 
 // ============================================================
-// Инициализация после включения питания (по datasheet HD44780):
-//   1. Display clear
-//   2. Function set: DL=1 (8-bit), N=0 (1-line), F=0 (5x8)
-//   3. Display on/off: D=0, C=0, B=0
-//   4. Entry mode: I/D=1 (increment), S=0 (no shift)
+// Инициализация после включения питания (HD44780, рис. 24 datasheet,
+// «Initializing by Instruction», 4-битный интерфейс):
+//   1. Пауза >40 мс после подъёма питания
+//   2. Трижды 0x3 (8-битный режим) с паузами 4.1 мс / 100 мкс
+//   3. 0x2 — переход в 4-битный режим
+//   4. Function set (строки, шрифт), Display on/off, Clear, Entry mode
 //
 // Сброс Arduino НЕ сбрасывает LCD — нельзя полагаться на
 // начальное состояние после reset.
+//
+// ВАЖНО: последовательность «0x3 x3» рассчитана на неизвестное/8-битное
+// состояние контроллера. begin() вызывается один раз за сессию питания.
 // ============================================================
 
 LiquidCrystal_I2C::LiquidCrystal_I2C(uint8_t lcd_addr, uint8_t lcd_cols,
@@ -19,15 +23,25 @@ LiquidCrystal_I2C::LiquidCrystal_I2C(uint8_t lcd_addr, uint8_t lcd_cols,
 {
     _addr = lcd_addr;
     _cols = lcd_cols;
-    _rows = lcd_rows;
+    _rows = (lcd_rows > 4) ? 4 : lcd_rows;
     _charsize = charsize;
     _backlightval = LCD_BACKLIGHT;
-    _lastError = 0;
+    _displayfunction = LCD_4BITMODE | LCD_1LINE | LCD_5x8DOTS;
+    _displaycontrol  = LCD_DISPLAYON | LCD_CURSOROFF | LCD_BLINKOFF;
+    _displaymode     = LCD_ENTRYLEFT | LCD_ENTRYSHIFTDECREMENT;
+    _lastError = LCD_ERR_NOT_INITIALIZED;
     _initialized = false;
 }
 
-void LiquidCrystal_I2C::begin() {
-    Wire.begin();
+bool LiquidCrystal_I2C::begin(bool initWire) {
+    _initialized = false;
+
+    if (_rows > 4) _rows = 4;   // begin(cols, rows) мог задать геометрию напрямую
+
+    if (initWire) {
+        Wire.begin();
+    }
+
     _displayfunction = LCD_4BITMODE | LCD_1LINE | LCD_5x8DOTS;
 
     if (_rows > 1) {
@@ -42,36 +56,39 @@ void LiquidCrystal_I2C::begin() {
     // По datasheet: минимум 40 мс после подъёма питания выше 2.7 В
     delay(50);
 
-    // Сброс экспандера, RS и R/W в 0
+    // Сброс экспандера, RS и R/W в 0. Заодно проверка наличия дисплея.
     expanderWrite(_backlightval);
-    delay(5);   // 5 мс достаточно для стабилизации PCF8574
+    if (_lastError != 0) {
+        return false;   // дисплей не ответил — _initialized остаётся false
+    }
+    delay(5);
 
-    // === Перевод в 4-битный режим (datasheet HD44780, рис. 24, стр. 46) ===
-    // Начинаем в 8-битном режиме, пытаемся переключить в 4-битный
+    // === Перевод в 4-битный режим ===
+    // Начинаем «вслепую» в неизвестном состоянии и трижды шлём 0x3.
 
-    // Первая попытка
     write4bits(0x03 << 4);
     delayMicroseconds(4500);  // минимум 4.1 мс
 
-    // Вторая попытка
     write4bits(0x03 << 4);
     delayMicroseconds(4500);  // минимум 4.1 мс
 
-    // Третья попытка
     write4bits(0x03 << 4);
-    delayMicroseconds(150);
+    delayMicroseconds(150);   // минимум 100 мкс
 
     // Финально — 4-битный интерфейс
     write4bits(0x02 << 4);
+    delayMicroseconds(150);
 
-    // Установка: кол-во строк, размер шрифта и т.д.
+    // С этого момента command()/write() работают.
+    _initialized = true;
+
+    // Кол-во строк, размер шрифта
     command(LCD_FUNCTIONSET | _displayfunction);
 
     // Включаем дисплей (без курсора и мигания)
     _displaycontrol = LCD_DISPLAYON | LCD_CURSOROFF | LCD_BLINKOFF;
     display();
 
-    // Очистка
     clear();
 
     // Направление текста по умолчанию (для европейских языков)
@@ -80,7 +97,7 @@ void LiquidCrystal_I2C::begin() {
 
     home();
 
-    _initialized = true;
+    return _lastError == 0;
 }
 
 // ============================================================
@@ -101,13 +118,17 @@ void LiquidCrystal_I2C::setCursor(uint8_t col, uint8_t row) {
     // Защита от неинициализированного дисплея
     if (!_initialized || _rows == 0 || _cols == 0) return;
 
-    // Статическая таблица — размещается в .rodata, не тратит стек
-    static const uint8_t row_offsets[] = { 0x00, 0x40, 0x14, 0x54 };
+    // Смещения строк DDRAM зависят от ширины:
+    //   20x4: 0x00, 0x40, 0x14, 0x54
+    //   16x4: 0x00, 0x40, 0x10, 0x50
+    const uint8_t row_offsets[4] = {
+        0x00, 0x40, _cols, (uint8_t)(0x40 + _cols)
+    };
 
-    if (row >= _rows) row = _rows - 1;
+    if (row >= _rows || row >= 4) row = (_rows - 1 < 3) ? _rows - 1 : 3;
     if (col >= _cols) col = _cols - 1;
 
-    command(LCD_SETDDRAMADDR | (col + row_offsets[row]));
+    command(LCD_SETDDRAMADDR | (uint8_t)(col + row_offsets[row]));
 }
 
 // Включение/выключение дисплея (быстро, без очистки)
@@ -176,25 +197,29 @@ void LiquidCrystal_I2C::noAutoscroll() {
 
 // Пользовательские символы (CGRAM, 8 слотов по 8 байт)
 void LiquidCrystal_I2C::createChar(uint8_t location, const uint8_t charmap[]) {
+    if (!_initialized) { _lastError = LCD_ERR_NOT_INITIALIZED; return; }
+
     location &= 0x7;  // только 8 слотов: 0-7
     command(LCD_SETCGRAMADDR | (location << 3));
     for (uint8_t i = 0; i < 8; i++) {
         write(charmap[i]);
     }
-    // Возврат в DDRAM (0,0): после createChar AC указывает в CGRAM,
+    // Возврат в DDRAM (0,0): после записи AC указывает в CGRAM,
     // и последующие print() ушли бы в CGRAM, а не на экран.
-    command(LCD_RETURNHOME);
+    // home() содержит нужную паузу ~1.5 мс.
+    home();
 }
 
-// Подсветка
+// Подсветка. До begin() только запоминаем состояние (шина ещё не запущена),
+// begin() применит его при первой записи в экспандер.
 void LiquidCrystal_I2C::noBacklight() {
     _backlightval = LCD_NOBACKLIGHT;
-    expanderWrite(_backlightval);
+    if (_initialized) expanderWrite(_backlightval);
 }
 
 void LiquidCrystal_I2C::backlight() {
     _backlightval = LCD_BACKLIGHT;
-    expanderWrite(_backlightval);
+    if (_initialized) expanderWrite(_backlightval);
 }
 
 bool LiquidCrystal_I2C::getBacklight() const {
@@ -206,48 +231,53 @@ bool LiquidCrystal_I2C::getBacklight() const {
 // ============================================================
 
 void LiquidCrystal_I2C::command(uint8_t value) {
-    if (!_initialized) return;
+    if (!_initialized) { _lastError = LCD_ERR_NOT_INITIALIZED; return; }
     send(value, 0);
 }
 
 size_t LiquidCrystal_I2C::write(uint8_t value) {
-    send(value, Rs);
-    return 1;
+    if (!_initialized) { _lastError = LCD_ERR_NOT_INITIALIZED; return 0; }
+    send(value, LCD_RS);
+    return (_lastError == 0) ? 1 : 0;
 }
 
 // ============================================================
 // Низкоуровневые команды передачи данных
 // ============================================================
 
-// Отправка команды или данных (4-битный режим: 2 передачи)
+// Отправка команды или данных (4-битный режим) ОДНОЙ I2C-транзакцией:
+// на каждый ниббл — байт с En=1 и байт с En=0. Длительность En=1 определяется
+// временем передачи байта по I2C (десятки мкс) и с запасом превышает 450 нс.
 void LiquidCrystal_I2C::send(uint8_t value, uint8_t mode) {
-    uint8_t highnib = (value & 0xf0) | mode;
-    uint8_t lownib  = ((value << 4) & 0xf0) | mode;
-    write4bits(highnib);
-    write4bits(lownib);
+    const uint8_t hi = (value & 0xF0) | mode | _backlightval;
+    const uint8_t lo = ((value << 4) & 0xF0) | mode | _backlightval;
+
+    Wire.beginTransmission(_addr);
+    Wire.write((uint8_t)(hi | LCD_EN));
+    Wire.write(hi);
+    Wire.write((uint8_t)(lo | LCD_EN));
+    Wire.write(lo);
+    _lastError = Wire.endTransmission();
+
+#if LCD_EXTRA_DELAY_US > 0
+    delayMicroseconds(LCD_EXTRA_DELAY_US);
+#endif
 }
 
+// Один ниббл (старшие 4 бита value) — только для последовательности
+// инициализации в begin(); там паузы выдерживаются вызывающим кодом.
 void LiquidCrystal_I2C::write4bits(uint8_t value) {
-    expanderWrite(value);
-    pulseEnable(value);
+    value |= _backlightval;
+    Wire.beginTransmission(_addr);
+    Wire.write((uint8_t)(value | LCD_EN));
+    Wire.write(value);
+    _lastError = Wire.endTransmission();
 }
 
 void LiquidCrystal_I2C::expanderWrite(uint8_t data) {
     Wire.beginTransmission(_addr);
-    Wire.write((int)(data) | _backlightval);
+    Wire.write((uint8_t)(data | _backlightval));
     _lastError = Wire.endTransmission();
-    // _lastError: 0=OK, 1=данные слишком длинные,
-    //             2=NACK по адресу, 3=NACK по данным, 4=другая ошибка
-}
-
-void LiquidCrystal_I2C::pulseEnable(uint8_t data) {
-    // En high
-    expanderWrite(data | En);
-    delayMicroseconds(1);   // импульс Enable > 450 нс
-
-    // En low
-    expanderWrite(data & ~En);
-    delayMicroseconds(50);  // команда требует > 37 мкс для выполнения
 }
 
 // ============================================================
@@ -274,8 +304,8 @@ void LiquidCrystal_I2C::printstr(const char c[]) {
 // Диагностика
 // ============================================================
 
+// Шина должна быть уже запущена (Wire.begin() в скетче или begin() библиотеки).
 bool LiquidCrystal_I2C::isConnected() {
-    if (!_initialized) return false;
     Wire.beginTransmission(_addr);
     _lastError = Wire.endTransmission();
     return _lastError == 0;
