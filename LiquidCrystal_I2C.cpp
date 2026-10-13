@@ -181,9 +181,9 @@ void LiquidCrystal_I2C::createChar(uint8_t location, const uint8_t charmap[]) {
     for (uint8_t i = 0; i < 8; i++) {
         write(charmap[i]);
     }
-    // Примечание: после записи в CGRAM адресный счётчик указывает
-    // на CGRAM, а не DDRAM. Пользователь должен вызвать setCursor()
-    // перед продолжением вывода текста.
+    // Возврат в DDRAM (0,0): после createChar AC указывает в CGRAM,
+    // и последующие print() ушли бы в CGRAM, а не на экран.
+    command(LCD_RETURNHOME);
 }
 
 // Подсветка
