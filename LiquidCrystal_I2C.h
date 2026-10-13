@@ -71,7 +71,11 @@ public:
      * @param lcd_cols   Количество колонок (16 или 20)
      * @param lcd_rows   Количество строк (2 или 4)
      * @param charsize   Размер символа: LCD_5x10DOTS или LCD_5x8DOTS
+     * После создания экземпляра ОБЯЗАТЕЛЬНО вызовите begin() —
+     * либо без аргументов (геометрия из конструктора), либо begin(cols, rows),
+     * либо init() (совместимость с альтернативными версиями библиотеки).
      */
+    
     LiquidCrystal_I2C(uint8_t lcd_addr, uint8_t lcd_cols, uint8_t lcd_rows, uint8_t charsize = LCD_5x8DOTS);
 
     /**
@@ -79,6 +83,12 @@ public:
      */
     void begin();
 
+    /** Совместимость: begin(cols, rows) — задаёт геометрию и инициализирует. */
+    void begin(uint8_t cols, uint8_t rows) { _cols = cols; _rows = rows; begin(); }   // <-- сюда
+
+    /** Совместимость: init() — идиома из альтернативных версий библиотеки. */
+    void init() { begin(); }  
+    
     /** Очистка дисплея и возврат курсора в позицию (0,0). */
     void clear();
 
@@ -129,15 +139,19 @@ public:
 
     /** Выключить автопрокрутку. */
     void noAutoscroll();
-
+    
+    /** Код последней I2C-операции: 0=OK, 2=NACK адреса, 3=NACK данных, 4=прочее. */
+    uint8_t getLastError() const { return _lastError; }
+    
     /**
      * Создать пользовательский символ (всего 8 слотов: 0-7).
      *
      * @param location Номер слота (0-7)
      * @param charmap  Массив из 8 байт, описывающих символ (5x8 пикселей)
      *
-     * @warning После вызова createChar() курсор сбрасывается в (0,0).
-     *          Вызовите setCursor() перед продолжением вывода.
+     * @warning После createChar() адресный счётчик указывает в CGRAM:
+     * последующие записи данных пойдут в CGRAM, а не на экран.
+     * Вызовите setCursor()/clear()/home() перед продолжением вывода.
      */
     void createChar(uint8_t location, const uint8_t charmap[]);
 

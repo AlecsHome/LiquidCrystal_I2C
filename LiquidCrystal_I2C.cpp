@@ -206,6 +206,7 @@ bool LiquidCrystal_I2C::getBacklight() const {
 // ============================================================
 
 void LiquidCrystal_I2C::command(uint8_t value) {
+    if (!_initialized) return;
     send(value, 0);
 }
 
@@ -274,6 +275,7 @@ void LiquidCrystal_I2C::printstr(const char c[]) {
 // ============================================================
 
 bool LiquidCrystal_I2C::isConnected() {
+    if (!_initialized) return false;
     Wire.beginTransmission(_addr);
     _lastError = Wire.endTransmission();
     return _lastError == 0;
